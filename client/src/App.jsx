@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, addDoc, getDocs, query, where } from 'firebase/firestore';
+import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail } from 'firebase/auth';
+import { getFirestore, collection, addDoc, getDocs, query, where, serverTimestamp } from 'firebase/firestore';
 import MenuManagement from './pages/MenuManagement';
 import OrdersManagement from './pages/OrdersManagement';
 import './App.css';
@@ -28,19 +28,38 @@ function App() {
     email: '',
     password: '',
     restaurantName: '',
+    rememberMe: false,
   });
   const [error, setError] = useState('');
   const [restaurant, setRestaurant] = useState(null);
+  const [showForgotPassword, setShowForgotPassword] = useState(false);
+  const [resetEmailSent, setResetEmailSent] = useState(false);
 
   useEffect(() => {
+    // Load remembered email
+    const rememberedEmail = localStorage.getItem('rememberedEmail');
+    if (rememberedEmail) {
+      setFormData(prev => ({ 
+        ...prev, 
+        email: rememberedEmail, 
+        rememberMe: true 
+      }));
+    }
+
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      console.log('Auth state changed:', user ? 'User logged in' : 'User logged out');
       setUser(user);
       if (user) {
         try {
+          console.log('Loading restaurant for user:', user.uid);
           const q = query(collection(db, 'restaurants'), where('userId', '==', user.uid));
           const querySnapshot = await getDocs(q);
           if (!querySnapshot.empty) {
-            setRestaurant({ id: querySnapshot.docs[0].id, ...querySnapshot.docs[0].data() });
+            const restaurantData = { id: querySnapshot.docs[0].id, ...querySnapshot.docs[0].data() };
+            console.log('Restaurant loaded:', restaurantData);
+            setRestaurant(restaurantData);
+          } else {
+            console.log('No restaurant found for user');
           }
           setCurrentPage('dashboard');
         } catch (error) {
@@ -55,20 +74,71 @@ function App() {
     return unsubscribe;
   }, []);
 
+  const validateForm = () => {
+    if (!formData.email || !formData.password) {
+      setError('يرجى ملء جميع الحقول المطلوبة');
+      return false;
+    }
+    
+    if (formData.password.length < 6) {
+      setError('كلمة المرور يجب أن تكون 6 أحرف على الأقل');
+      return false;
+    }
+    
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(formData.email)) {
+      setError('البريد الإلكتروني غير صحيح');
+      return false;
+    }
+    
+    return true;
+  };
+
   const handleInputChange = (e) => {
-    const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
+    const { name, value, type, checked } = e.target;
+    setFormData(prev => ({ 
+      ...prev, 
+      [name]: type === 'checkbox' ? checked : value 
+    }));
+    // Clear error when user starts typing
+    if (error) setError('');
   };
 
   const handleLogin = async (e) => {
     e.preventDefault();
     setError('');
+    
+    if (!validateForm()) return;
+    
     setLoading(true);
 
     try {
       await signInWithEmailAndPassword(auth, formData.email, formData.password);
+      
+      // Save email if remember me is checked
+      if (formData.rememberMe) {
+        localStorage.setItem('rememberedEmail', formData.email);
+      } else {
+        localStorage.removeItem('rememberedEmail');
+      }
+      
     } catch (error) {
-      setError('خطأ في تسجيل الدخول: ' + error.message);
+      console.error('Login error:', error);
+      let errorMessage = 'خطأ في تسجيل الدخول: ';
+      
+      if (error.code === 'auth/user-not-found') {
+        errorMessage += 'المستخدم غير موجود';
+      } else if (error.code === 'auth/wrong-password') {
+        errorMessage += 'كلمة المرور غير صحيحة';
+      } else if (error.code === 'auth/invalid-email') {
+        errorMessage += 'البريد الإلكتروني غير صحيح';
+      } else if (error.code === 'auth/too-many-requests') {
+        errorMessage += 'محاولات كثيرة جداً، حاول مرة أخرى لاحقاً';
+      } else {
+        errorMessage += error.message;
+      }
+      
+      setError(errorMessage);
     } finally {
       setLoading(false);
     }
@@ -77,26 +147,94 @@ function App() {
   const handleRegister = async (e) => {
     e.preventDefault();
     setError('');
+    
+    if (!validateForm()) return;
+    
+    if (!formData.restaurantName.trim()) {
+      setError('يرجى إدخال اسم المطعم');
+      return;
+    }
+    
     setLoading(true);
 
     try {
+      // Create user account
       const userCredential = await createUserWithEmailAndPassword(auth, formData.email, formData.password);
+      const user = userCredential.user;
       
-      // Create restaurant document
-      await addDoc(collection(db, 'restaurants'), {
-        userId: userCredential.user.uid,
-        name: formData.restaurantName,
+      // Create restaurant document immediately after user creation
+      const restaurantData = {
+        userId: user.uid,
+        name: formData.restaurantName.trim(),
         email: formData.email,
         location: '',
         logoUrl: '',
         paymentMethods: ['cash'],
         isOnline: false,
+        createdAt: serverTimestamp(),
+      };
+      
+      const restaurantRef = await addDoc(collection(db, 'restaurants'), restaurantData);
+      
+      // Set the restaurant data in state
+      setRestaurant({ id: restaurantRef.id, ...restaurantData });
+      
+      console.log('Restaurant created successfully:', restaurantRef.id);
+      
+      // Clear form
+      setFormData({
+        email: '',
+        password: '',
+        restaurantName: '',
+        rememberMe: false,
       });
 
     } catch (error) {
-      setError('خطأ في التسجيل: ' + error.message);
+      console.error('Registration error:', error);
+      let errorMessage = 'خطأ في التسجيل: ';
+      
+      if (error.code === 'auth/email-already-in-use') {
+        errorMessage += 'البريد الإلكتروني مستخدم بالفعل';
+      } else if (error.code === 'auth/weak-password') {
+        errorMessage += 'كلمة المرور ضعيفة جداً';
+      } else if (error.code === 'auth/invalid-email') {
+        errorMessage += 'البريد الإلكتروني غير صحيح';
+      } else if (error.code === 'permission-denied') {
+        errorMessage += 'ليس لديك صلاحية للوصول إلى قاعدة البيانات. يرجى التحقق من إعدادات Firebase';
+      } else {
+        errorMessage += error.message;
+      }
+      
+      setError(errorMessage);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleForgotPassword = async () => {
+    if (!formData.email) {
+      setError('يرجى إدخال البريد الإلكتروني أولاً');
+      return;
+    }
+
+    try {
+      await sendPasswordResetEmail(auth, formData.email);
+      setResetEmailSent(true);
+      setError('');
+      setShowForgotPassword(false);
+    } catch (error) {
+      console.error('Password reset error:', error);
+      let errorMessage = 'خطأ في إرسال رابط إعادة التعيين: ';
+      
+      if (error.code === 'auth/user-not-found') {
+        errorMessage += 'البريد الإلكتروني غير مسجل';
+      } else if (error.code === 'auth/invalid-email') {
+        errorMessage += 'البريد الإلكتروني غير صحيح';
+      } else {
+        errorMessage += error.message;
+      }
+      
+      setError(errorMessage);
     }
   };
 
@@ -166,6 +304,21 @@ function App() {
                 />
               </div>
 
+              {/* Remember Me Checkbox */}
+              <div className="flex items-center">
+                <input
+                  type="checkbox"
+                  name="rememberMe"
+                  id="rememberMe"
+                  checked={formData.rememberMe}
+                  onChange={handleInputChange}
+                  className="w-4 h-4 text-purple-600 bg-gray-100 border-gray-300 rounded focus:ring-purple-500 focus:ring-2"
+                />
+                <label htmlFor="rememberMe" className="mr-2 text-sm font-medium text-gray-700">
+                  تذكرني
+                </label>
+              </div>
+
               {error && (
                 <div className="bg-red-50 border-l-4 border-red-400 p-4 rounded-lg">
                   <div className="flex">
@@ -196,6 +349,25 @@ function App() {
                 )}
               </button>
             </form>
+
+            {/* Forgot Password Link */}
+            <div className="mt-4 text-center">
+              {resetEmailSent ? (
+                <div className="bg-green-50 border-l-4 border-green-400 p-4 rounded-lg">
+                  <p className="text-sm text-green-700">
+                    تم إرسال رابط إعادة تعيين كلمة المرور إلى بريدك الإلكتروني
+                  </p>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleForgotPassword}
+                  className="text-purple-600 hover:text-purple-800 text-sm font-medium transition-colors duration-200"
+                >
+                  نسيت كلمة المرور؟
+                </button>
+              )}
+            </div>
 
             <div className="mt-8 text-center">
               <p className="text-gray-600">
@@ -334,6 +506,83 @@ function App() {
     return <OrdersManagement onBack={() => setCurrentPage('dashboard')} />;
   }
 
+  // Demo Page - Show all components
+  if (currentPage === 'demo') {
+    return (
+      <div className="min-h-screen bg-gray-50 p-8">
+        <div className="max-w-4xl mx-auto">
+          <div className="bg-white rounded-2xl shadow-lg p-8 mb-8">
+            <h1 className="text-3xl font-bold text-purple-800 mb-6">جميع مكونات التطبيق</h1>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="bg-purple-50 rounded-xl p-6">
+                <h2 className="text-xl font-bold text-purple-800 mb-4">الصفحات الرئيسية</h2>
+                <ul className="space-y-2">
+                  <li>✅ صفحة تسجيل الدخول</li>
+                  <li>✅ صفحة التسجيل</li>
+                  <li>✅ لوحة التحكم</li>
+                  <li>✅ إدارة المنيو</li>
+                  <li>✅ إدارة الطلبات</li>
+                </ul>
+              </div>
+              
+              <div className="bg-green-50 rounded-xl p-6">
+                <h2 className="text-xl font-bold text-green-800 mb-4">المكونات المساعدة</h2>
+                <ul className="space-y-2">
+                  <li>✅ مكون قوة كلمة المرور</li>
+                  <li>✅ حماية الصفحات</li>
+                  <li>✅ رفع الصور</li>
+                  <li>✅ إشعارات فورية</li>
+                </ul>
+              </div>
+              
+              <div className="bg-blue-50 rounded-xl p-6">
+                <h2 className="text-xl font-bold text-blue-800 mb-4">الميزات المتقدمة</h2>
+                <ul className="space-y-2">
+                  <li>✅ تحديث الأسعار بالجملة</li>
+                  <li>✅ تفعيل/تعطيل الوجبات</li>
+                  <li>✅ تتبع حالة الطلبات</li>
+                  <li>✅ إشعارات صوتية</li>
+                </ul>
+              </div>
+              
+              <div className="bg-orange-50 rounded-xl p-6">
+                <h2 className="text-xl font-bold text-orange-800 mb-4">الخدمات المتكاملة</h2>
+                <ul className="space-y-2">
+                  <li>✅ Firebase Authentication</li>
+                  <li>✅ Firestore Database</li>
+                  <li>✅ Cloudinary Images</li>
+                  <li>✅ Socket.io Real-time</li>
+                </ul>
+              </div>
+            </div>
+            
+            <div className="mt-8 flex gap-4">
+              <button
+                onClick={() => setCurrentPage('menu')}
+                className="bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-6 rounded-xl transition-all duration-200"
+              >
+                تجربة إدارة المنيو
+              </button>
+              <button
+                onClick={() => setCurrentPage('orders')}
+                className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-xl transition-all duration-200"
+              >
+                تجربة إدارة الطلبات
+              </button>
+              <button
+                onClick={() => setCurrentPage('dashboard')}
+                className="bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-xl transition-all duration-200"
+              >
+                العودة للوحة التحكم
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Dashboard Page
   return (
     <div className="min-h-screen bg-gray-50">
@@ -377,14 +626,21 @@ function App() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {restaurant ? (
+        {restaurant || user ? (
           <>
             {/* Welcome Section */}
             <div className="bg-gradient-to-r from-purple-600 to-purple-800 rounded-2xl p-8 mb-8 text-white">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-3xl font-bold mb-2">مرحباً بك في {restaurant.name}</h2>
+                  <h2 className="text-3xl font-bold mb-2">مرحباً بك في {restaurant?.name || 'مطعمك'}</h2>
                   <p className="text-purple-100">إدارة شاملة لمطعمك بكل سهولة</p>
+                  {!restaurant && (
+                    <div className="mt-4 bg-yellow-500 bg-opacity-20 border border-yellow-300 rounded-lg p-3">
+                      <p className="text-yellow-100 text-sm">
+                        ⚠️ تحتاج إلى تحديث قواعد Firestore لحفظ بيانات المطعم بشكل دائم
+                      </p>
+                    </div>
+                  )}
                 </div>
                 <div className="hidden md:block">
                   <div className="w-24 h-24 bg-white bg-opacity-10 rounded-2xl flex items-center justify-center">
@@ -410,10 +666,10 @@ function App() {
                 </div>
                 <div className="space-y-2">
                   <p className="text-gray-600 text-sm">
-                    <span className="font-semibold">الاسم:</span> {restaurant.name}
+                    <span className="font-semibold">الاسم:</span> {restaurant?.name || 'مطعمي'}
                   </p>
                   <p className="text-gray-600 text-sm">
-                    <span className="font-semibold">البريد:</span> {restaurant.email}
+                    <span className="font-semibold">البريد:</span> {restaurant?.email || user?.email}
                   </p>
                 </div>
               </div>
@@ -488,14 +744,20 @@ function App() {
               </h2>
               
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <button className="bg-gradient-to-r from-blue-50 to-blue-100 hover:from-blue-100 hover:to-blue-200 text-blue-800 font-semibold py-4 px-6 rounded-xl transition-all duration-200 transform hover:scale-105 flex flex-col items-center gap-2">
+                <button 
+                  onClick={() => setCurrentPage('menu')}
+                  className="bg-gradient-to-r from-blue-50 to-blue-100 hover:from-blue-100 hover:to-blue-200 text-blue-800 font-semibold py-4 px-6 rounded-xl transition-all duration-200 transform hover:scale-105 flex flex-col items-center gap-2"
+                >
                   <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
                   </svg>
                   إضافة وجبة
                 </button>
                 
-                <button className="bg-gradient-to-r from-green-50 to-green-100 hover:from-green-100 hover:to-green-200 text-green-800 font-semibold py-4 px-6 rounded-xl transition-all duration-200 transform hover:scale-105 flex flex-col items-center gap-2">
+                <button 
+                  onClick={() => setCurrentPage('orders')}
+                  className="bg-gradient-to-r from-green-50 to-green-100 hover:from-green-100 hover:to-green-200 text-green-800 font-semibold py-4 px-6 rounded-xl transition-all duration-200 transform hover:scale-105 flex flex-col items-center gap-2"
+                >
                   <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20">
                     <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
@@ -510,11 +772,14 @@ function App() {
                   تحديث الأسعار
                 </button>
                 
-                <button className="bg-gradient-to-r from-orange-50 to-orange-100 hover:from-orange-100 hover:to-orange-200 text-orange-800 font-semibold py-4 px-6 rounded-xl transition-all duration-200 transform hover:scale-105 flex flex-col items-center gap-2">
+                <button 
+                  onClick={() => setCurrentPage('demo')}
+                  className="bg-gradient-to-r from-orange-50 to-orange-100 hover:from-orange-100 hover:to-orange-200 text-orange-800 font-semibold py-4 px-6 rounded-xl transition-all duration-200 transform hover:scale-105 flex flex-col items-center gap-2"
+                >
                   <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20">
                     <path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z" />
                   </svg>
-                  التقارير
+                  عرض المكونات
                 </button>
               </div>
             </div>
