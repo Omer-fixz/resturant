@@ -1,0 +1,23 @@
+name: sudanese_restaurant_app
+description: تطبيق مطعم سوداني
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  image_picker: ^1.0.0
+  http: ^1.1.0
+  cloud_firestore: ^4.13.0
+  firebase_core: ^2.24.0
+  firebase_storage: ^11.5.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_linter:
+    sdk: flutter
